@@ -41,6 +41,7 @@ const managerNav = [
   { label: "Demand Forecast",  href: "/manager/demand-forecast", icon: TrendingUp },
   { label: "Vendors",          href: "/manager/vendors",         icon: Truck },
   { label: "Vendor Analytics", href: "/manager/vendor-analytics",icon: BarChart3 },
+  { label: "Transactions",     href: "/manager/transactions",    icon: Receipt },
   { label: "Billers",          href: "/manager/billers",         icon: Users },
   { label: "Reports",          href: "/manager/reports",         icon: FileText },
   { label: "Settings",         href: "/manager/settings",        icon: Settings },
