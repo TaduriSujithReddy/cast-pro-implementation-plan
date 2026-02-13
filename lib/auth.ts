@@ -4,6 +4,13 @@ import type { User } from "./types"
 
 const SESSION_KEY = "castpro_session"
 
+/**
+ * Authentication — cookie-based session for the built-in mock data layer.
+ * When you switch to the FastAPI backend, the frontend uses JWT tokens
+ * stored in localStorage via lib/api-client.ts instead. The cookie-based
+ * session here still handles SSR redirects and layout auth guards.
+ */
+
 export async function authenticate(email: string, password: string): Promise<User | null> {
   const storedPassword = passwords[email]
   if (!storedPassword || storedPassword !== password) return null
@@ -17,7 +24,7 @@ export async function createSession(user: User) {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
-    maxAge: 60 * 60 * 24, // 1 day
+    maxAge: 60 * 60 * 24,
     path: "/",
   })
 }
