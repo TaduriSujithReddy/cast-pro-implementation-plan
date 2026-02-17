@@ -8,3 +8,7 @@ python-jose[cryptography]==3.3.0
 python-multipart==0.0.9
 pydantic[email-validation]==2.9.0
 pydantic-settings==2.5.0
+prophet==1.1.5
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.1

@@ -99,6 +99,16 @@ export const api = {
   getUsers: (role?: string) =>
     request<any[]>(`/users${role ? `?role=${role}` : ""}`),
 
+  // ── Forecast (Prophet) ──
+  getForecastProducts: () =>
+    request<{ id: number; name: string; category: string }[]>("/forecast/products"),
+  getProductForecast: (productId: number, days?: number) =>
+    request<any>(`/forecast/product/${productId}${days ? `?days=${days}` : ""}`),
+  getCategoryForecasts: () =>
+    request<any[]>("/forecast/categories"),
+  getForecastAccuracy: () =>
+    request<any>("/forecast/accuracy"),
+
   // ── Health ──
   health: () => request<{ status: string }>("/health"),
 }
