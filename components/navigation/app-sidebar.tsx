@@ -45,7 +45,6 @@ const managerNav = [
   { label: "Billers",          href: "/manager/billers",         icon: Users },
   { label: "Reports",          href: "/manager/reports",         icon: FileText },
   { label: "Settings",         href: "/manager/settings",        icon: Settings },
-  { label: "UML Diagrams",    href: "/manager/uml-diagrams",   icon: FileText },
 ]
 
 const billerNav = [
