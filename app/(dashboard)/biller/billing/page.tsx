@@ -1,23 +1,33 @@
 "use client"
 
 import { useState, useMemo, useRef } from "react"
+import useSWR, { mutate } from "swr"
+import { fetcher } from "@/lib/fetcher"
 import { useAuth } from "@/contexts/auth-context"
-import { products as allProducts, storeSettings } from "@/lib/mock-data"
-import type { BillItem } from "@/lib/types"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Search, Plus, Minus, Trash2, ShoppingCart, Printer, QrCode, Banknote } from "lucide-react"
+
+interface CartItem {
+  product_id: number
+  product_name: string
+  quantity: number
+  unit_price: number
+  total: number
+}
 
 export default function BillingPage() {
   const { user } = useAuth()
+  const { data: products } = useSWR("/api/products", fetcher)
+  const { data: settings } = useSWR("/api/settings", fetcher)
   const [search, setSearch] = useState("")
-  const [cart, setCart] = useState<BillItem[]>([])
+  const [cart, setCart] = useState<CartItem[]>([])
   const [customerName, setCustomerName] = useState("")
   const [customerPhone, setCustomerPhone] = useState("")
   const [discount, setDiscount] = useState(0)
@@ -25,48 +35,97 @@ export default function BillingPage() {
   const [cashReceived, setCashReceived] = useState(0)
   const [receiptOpen, setReceiptOpen] = useState(false)
   const [savedBill, setSavedBill] = useState<{ billNumber: string; date: string } | null>(null)
+  const [submitting, setSubmitting] = useState(false)
   const receiptRef = useRef<HTMLDivElement>(null)
 
-  const taxRate = storeSettings.taxRate
+  const taxRate = settings?.tax_rate ?? 5
   const subtotal = cart.reduce((s, i) => s + i.total, 0)
   const taxAmount = Math.round(subtotal * (taxRate / 100) * 100) / 100
   const totalAmount = subtotal + taxAmount - discount
   const changeReturned = paymentMethod === "cash" ? Math.max(0, cashReceived - totalAmount) : 0
 
+  const allProducts = products ?? []
+
   const searchResults = useMemo(() => {
     if (!search.trim()) return []
-    return allProducts.filter((p) => p.isActive && p.currentStock > 0 && (p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()))).slice(0, 8)
-  }, [search])
+    return allProducts.filter((p: { name: string; sku: string; stock: number }) =>
+      p.stock > 0 && (p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()))
+    ).slice(0, 8)
+  }, [search, allProducts])
 
   function addToCart(productId: number) {
-    const product = allProducts.find((p) => p.id === productId)
+    const product = allProducts.find((p: { id: number }) => p.id === productId)
     if (!product) return
-    const existing = cart.find((i) => i.productId === productId)
+    const existing = cart.find((i) => i.product_id === productId)
     if (existing) {
-      setCart((prev) => prev.map((i) => i.productId === productId ? { ...i, quantity: i.quantity + 1, total: (i.quantity + 1) * i.unitPrice } : i))
+      setCart((prev) => prev.map((i) => i.product_id === productId ? { ...i, quantity: i.quantity + 1, total: (i.quantity + 1) * i.unit_price } : i))
     } else {
-      setCart((prev) => [...prev, { productId: product.id, productName: product.name, quantity: 1, unitPrice: product.price, total: product.price }])
+      setCart((prev) => [...prev, { product_id: product.id, product_name: product.name, quantity: 1, unit_price: Number(product.price), total: Number(product.price) }])
     }
     setSearch("")
   }
 
   function updateQty(productId: number, delta: number) {
     setCart((prev) => prev.map((i) => {
-      if (i.productId !== productId) return i
+      if (i.product_id !== productId) return i
       const newQty = Math.max(1, i.quantity + delta)
-      return { ...i, quantity: newQty, total: newQty * i.unitPrice }
+      return { ...i, quantity: newQty, total: newQty * i.unit_price }
     }))
   }
 
   function removeItem(productId: number) {
-    setCart((prev) => prev.filter((i) => i.productId !== productId))
+    setCart((prev) => prev.filter((i) => i.product_id !== productId))
   }
 
-  function handleCompleteBill() {
-    const now = new Date()
-    const billNumber = `BILL-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${String(Math.floor(Math.random() * 999) + 1).padStart(3, "0")}`
-    setSavedBill({ billNumber, date: now.toLocaleString() })
-    setReceiptOpen(true)
+  async function handleCompleteBill() {
+    if (!user) return
+    setSubmitting(true)
+    try {
+      // Generate bill number
+      const num = Date.now().toString().slice(-6)
+      const billNumber = `BILL-${num}`
+
+      const bill = {
+        bill_number: billNumber,
+        customer_name: customerName || "Walk-in",
+        customer_phone: customerPhone,
+        subtotal,
+        tax_percent: taxRate,
+        tax_amount: taxAmount,
+        discount_percent: 0,
+        discount_amount: discount,
+        total: totalAmount,
+        payment_method: paymentMethod,
+        payment_status: "completed",
+        cash_received: paymentMethod === "cash" ? cashReceived : totalAmount,
+        change_amount: changeReturned,
+        biller_id: user.id,
+      }
+
+      const items = cart.map((item) => ({
+        product_id: item.product_id,
+        product_name: item.product_name,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        total: item.total,
+      }))
+
+      const res = await fetch("/api/bills", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bill, items }),
+      })
+
+      if (!res.ok) throw new Error("Failed to create bill")
+
+      setSavedBill({ billNumber, date: new Date().toLocaleString() })
+      setReceiptOpen(true)
+      mutate("/api/products")
+      mutate("/api/bills")
+      mutate("/api/dashboard")
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   function handlePrint() {
@@ -90,6 +149,10 @@ export default function BillingPage() {
     setReceiptOpen(false)
   }
 
+  if (!products || !settings) {
+    return <div className="flex flex-col gap-6"><h1 className="text-2xl font-bold tracking-tight">New Bill</h1><Skeleton className="h-96 rounded-xl" /></div>
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -98,13 +161,9 @@ export default function BillingPage() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Left: Product Search + Cart */}
         <div className="flex flex-col gap-4 lg:col-span-2">
-          {/* Product Search */}
           <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Add Products</CardTitle>
-            </CardHeader>
+            <CardHeader className="pb-3"><CardTitle className="text-base">Add Products</CardTitle></CardHeader>
             <CardContent>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -112,14 +171,14 @@ export default function BillingPage() {
               </div>
               {searchResults.length > 0 && (
                 <div className="mt-2 rounded-md border">
-                  {searchResults.map((p) => (
+                  {searchResults.map((p: { id: number; name: string; sku: string; stock: number; price: number }) => (
                     <button key={p.id} className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-muted/50 transition-colors" onClick={() => addToCart(p.id)}>
                       <div className="text-left">
                         <p className="font-medium">{p.name}</p>
-                        <p className="text-xs text-muted-foreground">{p.sku} -- Stock: {p.currentStock}</p>
+                        <p className="text-xs text-muted-foreground">{p.sku} -- Stock: {p.stock}</p>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold">Rs.{p.price}</span>
+                        <span className="font-semibold">Rs.{Number(p.price)}</span>
                         <Plus className="h-4 w-4 text-primary" />
                       </div>
                     </button>
@@ -129,42 +188,30 @@ export default function BillingPage() {
             </CardContent>
           </Card>
 
-          {/* Cart Table */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <ShoppingCart className="h-4 w-4" />
-                Cart ({cart.length} items)
-              </CardTitle>
+              <CardTitle className="flex items-center gap-2 text-base"><ShoppingCart className="h-4 w-4" />Cart ({cart.length} items)</CardTitle>
             </CardHeader>
             <CardContent className="overflow-x-auto p-0">
               {cart.length === 0 ? (
                 <p className="px-6 py-8 text-center text-sm text-muted-foreground">Search and add products above</p>
               ) : (
                 <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Product</TableHead>
-                      <TableHead className="text-center">Qty</TableHead>
-                      <TableHead className="text-right">Price</TableHead>
-                      <TableHead className="text-right">Total</TableHead>
-                      <TableHead></TableHead>
-                    </TableRow>
-                  </TableHeader>
+                  <TableHeader><TableRow><TableHead>Product</TableHead><TableHead className="text-center">Qty</TableHead><TableHead className="text-right">Price</TableHead><TableHead className="text-right">Total</TableHead><TableHead></TableHead></TableRow></TableHeader>
                   <TableBody>
                     {cart.map((item) => (
-                      <TableRow key={item.productId}>
-                        <TableCell className="font-medium">{item.productName}</TableCell>
+                      <TableRow key={item.product_id}>
+                        <TableCell className="font-medium">{item.product_name}</TableCell>
                         <TableCell>
                           <div className="flex items-center justify-center gap-1">
-                            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => updateQty(item.productId, -1)}><Minus className="h-3 w-3" /></Button>
+                            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => updateQty(item.product_id, -1)}><Minus className="h-3 w-3" /></Button>
                             <span className="w-8 text-center text-sm">{item.quantity}</span>
-                            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => updateQty(item.productId, 1)}><Plus className="h-3 w-3" /></Button>
+                            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => updateQty(item.product_id, 1)}><Plus className="h-3 w-3" /></Button>
                           </div>
                         </TableCell>
-                        <TableCell className="text-right">Rs.{item.unitPrice}</TableCell>
+                        <TableCell className="text-right">Rs.{item.unit_price}</TableCell>
                         <TableCell className="text-right font-medium">Rs.{item.total}</TableCell>
-                        <TableCell><Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => removeItem(item.productId)}><Trash2 className="h-3.5 w-3.5" /></Button></TableCell>
+                        <TableCell><Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => removeItem(item.product_id)}><Trash2 className="h-3.5 w-3.5" /></Button></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -174,9 +221,7 @@ export default function BillingPage() {
           </Card>
         </div>
 
-        {/* Right: Customer Info + Bill Summary + Payment */}
         <div className="flex flex-col gap-4">
-          {/* Customer Info */}
           <Card>
             <CardHeader className="pb-3"><CardTitle className="text-base">Customer Info</CardTitle></CardHeader>
             <CardContent className="flex flex-col gap-3">
@@ -185,7 +230,6 @@ export default function BillingPage() {
             </CardContent>
           </Card>
 
-          {/* Bill Summary */}
           <Card>
             <CardHeader className="pb-3"><CardTitle className="text-base">Bill Summary</CardTitle></CardHeader>
             <CardContent className="flex flex-col gap-2 text-sm">
@@ -200,42 +244,29 @@ export default function BillingPage() {
             </CardContent>
           </Card>
 
-          {/* Payment */}
           <Card>
             <CardHeader className="pb-3"><CardTitle className="text-base">Payment</CardTitle></CardHeader>
             <CardContent className="flex flex-col gap-3">
               <div className="grid grid-cols-2 gap-2">
-                <Button variant={paymentMethod === "cash" ? "default" : "outline"} onClick={() => setPaymentMethod("cash")} className="flex items-center gap-2">
-                  <Banknote className="h-4 w-4" /> Cash
-                </Button>
-                <Button variant={paymentMethod === "upi" ? "default" : "outline"} onClick={() => setPaymentMethod("upi")} className="flex items-center gap-2">
-                  <QrCode className="h-4 w-4" /> UPI
-                </Button>
+                <Button variant={paymentMethod === "cash" ? "default" : "outline"} onClick={() => setPaymentMethod("cash")} className="flex items-center gap-2"><Banknote className="h-4 w-4" /> Cash</Button>
+                <Button variant={paymentMethod === "upi" ? "default" : "outline"} onClick={() => setPaymentMethod("upi")} className="flex items-center gap-2"><QrCode className="h-4 w-4" /> UPI</Button>
               </div>
-
               {paymentMethod === "cash" && (
                 <div className="flex flex-col gap-2">
                   <Label>Cash Received</Label>
                   <Input type="number" value={cashReceived || ""} onChange={(e) => setCashReceived(Number(e.target.value))} placeholder="Enter amount" />
                   {cashReceived > 0 && cashReceived >= totalAmount && (
-                    <div className="rounded-md bg-emerald-50 p-2 text-sm text-emerald-700">
-                      Change: <span className="font-bold">Rs.{changeReturned.toFixed(2)}</span>
-                    </div>
+                    <div className="rounded-md bg-emerald-50 p-2 text-sm text-emerald-700">Change: <span className="font-bold">Rs.{changeReturned.toFixed(2)}</span></div>
                   )}
                 </div>
               )}
-
               {paymentMethod === "upi" && (
                 <div className="flex flex-col items-center gap-2">
-                  {storeSettings.upiQrImage ? (
-                    <img src={storeSettings.upiQrImage} alt="UPI QR Code" className="h-48 w-48 rounded-md border" />
+                  {settings.upi_qr_url ? (
+                    <img src={settings.upi_qr_url} alt="UPI QR Code" className="h-48 w-48 rounded-md border" />
                   ) : (
                     <div className="flex h-48 w-48 items-center justify-center rounded-md border border-dashed text-center text-sm text-muted-foreground">
-                      <div>
-                        <QrCode className="mx-auto mb-2 h-8 w-8" />
-                        <p>No QR uploaded</p>
-                        <p className="text-xs">Manager can upload in Settings</p>
-                      </div>
+                      <div><QrCode className="mx-auto mb-2 h-8 w-8" /><p>No QR uploaded</p><p className="text-xs">Manager can upload in Settings</p></div>
                     </div>
                   )}
                   <p className="text-xs text-muted-foreground">Ask customer to scan and pay Rs.{totalAmount.toFixed(2)}</p>
@@ -243,15 +274,14 @@ export default function BillingPage() {
               )}
             </CardContent>
             <CardFooter>
-              <Button className="w-full" size="lg" disabled={cart.length === 0 || (paymentMethod === "cash" && cashReceived < totalAmount)} onClick={handleCompleteBill}>
-                Complete Bill
+              <Button className="w-full" size="lg" disabled={cart.length === 0 || (paymentMethod === "cash" && cashReceived < totalAmount) || submitting} onClick={handleCompleteBill}>
+                {submitting ? "Processing..." : "Complete Bill"}
               </Button>
             </CardFooter>
           </Card>
         </div>
       </div>
 
-      {/* Receipt Dialog */}
       <Dialog open={receiptOpen} onOpenChange={setReceiptOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -260,9 +290,7 @@ export default function BillingPage() {
           </DialogHeader>
           <div ref={receiptRef} className="rounded-md border p-4 font-mono text-xs">
             <div className="text-center">
-              <p className="text-sm font-bold">{storeSettings.storeName}</p>
-              <p>{storeSettings.storeAddress}</p>
-              <p>{storeSettings.storePhone}</p>
+              <p className="text-sm font-bold">{settings.store_name}</p>
               <hr className="my-2 border-dashed" />
               <p className="font-bold">{savedBill?.billNumber}</p>
               <p>{savedBill?.date}</p>
@@ -274,7 +302,7 @@ export default function BillingPage() {
               <thead><tr><td className="font-bold">Item</td><td className="font-bold text-center">Qty</td><td className="font-bold text-right">Amt</td></tr></thead>
               <tbody>
                 {cart.map((item) => (
-                  <tr key={item.productId}><td>{item.productName}</td><td className="text-center">{item.quantity}</td><td className="text-right">Rs.{item.total}</td></tr>
+                  <tr key={item.product_id}><td>{item.product_name}</td><td className="text-center">{item.quantity}</td><td className="text-right">Rs.{item.total}</td></tr>
                 ))}
               </tbody>
             </table>
@@ -292,7 +320,7 @@ export default function BillingPage() {
               </>
             )}
             <hr className="my-2 border-dashed" />
-            <p className="text-center">{storeSettings.receiptFooter}</p>
+            <p className="text-center">{settings.receipt_footer}</p>
           </div>
           <DialogFooter className="flex gap-2">
             <Button variant="outline" onClick={handlePrint}><Printer className="mr-2 h-4 w-4" />Print</Button>

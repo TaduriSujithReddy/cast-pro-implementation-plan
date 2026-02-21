@@ -2,10 +2,11 @@
 
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
-import type { User } from "@/lib/types"
+import { createClient } from "@/lib/supabase/client"
+import type { AppUser } from "@/lib/auth"
 
 interface AuthCtx {
-  user: User | null
+  user: AppUser | null
   loading: boolean
   login: (email: string, password: string) => Promise<string | null>
   logout: () => Promise<void>
@@ -18,26 +19,39 @@ const Ctx = createContext<AuthCtx>({
   logout: async () => {},
 })
 
-export function AuthProvider({ children, initialUser }: { children: ReactNode; initialUser: User | null }) {
-  const [user, setUser] = useState<User | null>(initialUser)
+export function AuthProvider({ children, initialUser }: { children: ReactNode; initialUser: AppUser | null }) {
+  const [user, setUser] = useState<AppUser | null>(initialUser)
   const [loading, setLoading] = useState(false)
   const router = useRouter()
 
   const login = useCallback(async (email: string, password: string): Promise<string | null> => {
     setLoading(true)
     try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        return data.error ?? "Login failed"
+      const supabase = createClient()
+      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) return error.message
+
+      // Fetch profile to get role
+      const { data: { user: authUser } } = await supabase.auth.getUser()
+      if (!authUser) return "Failed to get user"
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", authUser.id)
+        .single()
+
+      if (!profile) return "Profile not found"
+
+      const appUser: AppUser = {
+        id: profile.id,
+        name: profile.name,
+        email: profile.email,
+        role: profile.role,
       }
-      const { user: u } = await res.json()
-      setUser(u)
-      router.push(u.role === "manager" ? "/manager" : "/biller")
+
+      setUser(appUser)
+      router.push(appUser.role === "manager" ? "/manager" : "/biller")
       router.refresh()
       return null
     } catch {
@@ -48,7 +62,8 @@ export function AuthProvider({ children, initialUser }: { children: ReactNode; i
   }, [router])
 
   const logout = useCallback(async () => {
-    await fetch("/api/auth/logout", { method: "POST" })
+    const supabase = createClient()
+    await supabase.auth.signOut()
     setUser(null)
     router.push("/login")
     router.refresh()
