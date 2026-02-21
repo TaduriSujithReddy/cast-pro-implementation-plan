@@ -28,10 +28,27 @@ def create_access_token(data: dict) -> str:
 
 
 def decode_token(token: str) -> dict | None:
+    """Try decoding with the app secret first, then Supabase JWT secret."""
+    # Try app-level JWT
     try:
         return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     except JWTError:
-        return None
+        pass
+
+    # Try Supabase JWT
+    if settings.SUPABASE_JWT_SECRET:
+        try:
+            payload = jwt.decode(
+                token,
+                settings.SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+            return payload
+        except JWTError:
+            pass
+
+    return None
 
 
 def get_current_user(
@@ -41,10 +58,28 @@ def get_current_user(
     payload = decode_token(credentials.credentials)
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    user_id: int = payload.get("sub")
-    if user_id is None:
+
+    # Supabase tokens use "sub" as UUID string
+    user_sub = payload.get("sub")
+    if user_sub is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
+
+    # Try matching by ID (integer for legacy) or by Supabase UUID via profiles table
+    try:
+        user_id = int(user_sub)
+        user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
+    except (ValueError, TypeError):
+        # Supabase UUID -- look up in profiles table then match user by email
+        from sqlalchemy import text
+        result = db.execute(
+            text("SELECT email, role FROM profiles WHERE id = :uid"),
+            {"uid": user_sub},
+        ).fetchone()
+        if result:
+            user = db.query(User).filter(User.email == result[0], User.is_active == True).first()
+        else:
+            user = None
+
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
